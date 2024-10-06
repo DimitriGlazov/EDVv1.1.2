@@ -112,6 +112,7 @@ class QRScannerApp(QWidget):
         self.cap.release()
         cv2.destroyAllWindows()
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     qr_scanner_app = QRScannerApp()
