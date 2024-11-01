@@ -1,24 +1,27 @@
-"""
-Paperless Document Verification 
-by D.Rana
-Compatible when files are uploaded in Google Drive and similar applications 
-V1.1.3
-The code is not for open-source purposes solely
-"""
-
-# Importing Modules 
+# Importing necessary modules
 import cv2
 import pyzbar.pyzbar as pyzbar
 import webbrowser
 import pygame
 import time
 import sys
+import json
+import pytesseract  # Import for OCR
+import re
+import requests
 from PyQt5.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 from PyQt5.QtGui import QImage, QPixmap, QIcon
 from PyQt5.QtCore import QTimer
+from PIL import Image
+import io
+import numpy as np
 
 # Initialize pygame mixer
 pygame.mixer.init()
+
+# Paths to success and Aadhaar detected sounds
+SUCCESS_SOUND = "D:\Python\Main Python Directory\Mega Project Prototype 1\Prototype assets\Application success.mp3"
+AADHAAR_DETECTED_SOUND = "D:\Python\Main Python Directory\Mega Project Prototype 1\Prototype assets\Aadhar detected.mp3"
 
 class QRScannerApp(QWidget):
     def __init__(self):
@@ -28,83 +31,98 @@ class QRScannerApp(QWidget):
         self.cap.set(3, 1280)  # Width
         self.cap.set(4, 720)   # Height
         self.browser_opened = False
-        self.first_detect_time = None
         self.qr_data = None
 
         # Timer to update the video feed
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
-        self.timer.start(2)
+        self.timer.start(30)  # Adjust the timer to control the frame rate
 
     def initUI(self):
         # Set up the window
-        self.setWindowTitle("EDV")
-        self.setWindowIcon(QIcon(r"D:\Python\Main Python Directory\Mega Project Prototype 1\Prototype assets\qricon.ico"))
+        self.setWindowTitle("Veriquick - Document Scanner")
+        self.setWindowIcon(QIcon("D:\Python\Main Python Directory\Mega Project Prototype 1\Prototype assets\qricon.ico"))
         
         # Set up layout and video display label
         self.image_label = QLabel(self)
         layout = QVBoxLayout()
         layout.addWidget(self.image_label)
         self.setLayout(layout)
-        
         self.show()
 
     def update_frame(self):
-        success, image = self.cap.read()
+        success, frame = self.cap.read()
         if not success:
+            print("Error reading frame from camera.")
             return
 
-        # Decode the QR code in the image
-        decoded_objs = pyzbar.decode(image)
-        
-
+        # Decode QR code from frame
+        decoded_objs = pyzbar.decode(frame)
         if decoded_objs:
-            if self.first_detect_time is None:
-                
-                # Record the time when the QR code is first detected
-                self.first_detect_time = time.time()
-                
-                # Play the initial beep sound when QR code is detected
-                pygame.mixer.music.load(r"D:\Python\Main Python Directory\Mega Project Prototype 1\Prototype assets\Samsung Notifications - Beep Once.mp3")
-                pygame.mixer.music.play()
+            for obj in decoded_objs:
+                data = obj.data.decode('utf-8')
+                print(f"Decoded QR Code Data: {data}")
+                x, y, w, h = obj.rect
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 250, 0), 2)
 
-            # Check if 3 seconds have passed since the QR code was first detected
-            if time.time() - self.first_detect_time >= 1 and not self.browser_opened:
-                for obj in decoded_objs:
-                    data = obj.data.decode('utf-8')
-                    x, y, w, h = obj.rect
-                    cv2.rectangle(image, (x, y), (x + w, y + h), (0, 250, 0), 2)
+                # Process QR data if it's a new scan
+                if not self.browser_opened and (self.qr_data is None or self.qr_data != data):
+                    self.qr_data = data
+                    document_metadata = self.process_qr_data(data)
 
-                    if not self.browser_opened and (self.qr_data is None or self.qr_data != data):
-                        # Open the browser with the QR code link
-                        webbrowser.open(data)
-                        self.browser_opened = True
-                        self.qr_data = data
+                    if document_metadata:
+                        for doc in document_metadata["files"]:
+                            doc_type = doc.get("document_type", "Unknown")
+                            doc_url = doc.get("document_url", "")
+                            aadhaar_numbers = doc.get("aadhaar_numbers", [])
 
-                        # Play the success sound
-                        pygame.mixer.music.load(r"d:\Python\Main Python Directory\Mega Project Prototype 1\Prototype assets\QR Success.mp3")
-                        pygame.mixer.music.play()
+                            if doc_type == "Aadhaar" and aadhaar_numbers:
+                                print("Aadhaar detected. Verifying...")
+                                
+                                # Attempt to play the Aadhaar detected sound
+                                try:
+                                    pygame.mixer.init()
+                                    pygame.mixer.music.load(AADHAAR_DETECTED_SOUND)
+                                    pygame.mixer.music.play()
+                                    print("Aadhaar detected sound played successfully.")
+                                except Exception as e:
+                                    print(f"Error playing Aadhaar detected sound: {e}")
 
-                        # Wait for 5 seconds before allowing the next scan
-                        QTimer.singleShot(2000, self.reset_browser_flag)
+                                webbrowser.open(doc_url)
+                                self.browser_opened = True
+                            else:
+                                print(f"{doc_type} document needs manual verification.")
+                                webbrowser.open(doc_url)
+                                self.browser_opened = True
 
-                    # Draw a rectangle around the QR code
-                    
+                        # Play success sound after all documents are processed
+                        try:
+                            pygame.mixer.init()
+                            pygame.mixer.music.load(SUCCESS_SOUND)
+                            pygame.mixer.music.play()
+                            print("Success sound played successfully.")
+                        except Exception as e:
+                            print(f"Error playing success sound: {e}")
+
+                    QTimer.singleShot(5000, self.reset_browser_flag)  # Reset after 5 seconds
         else:
-            # Reset the detection time if no QR code is detected
-            self.first_detect_time = None
             self.qr_data = None
 
-        # Convert the image to RGB and display it
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_image.shape
+        # Convert the frame to RGB and display it in the PyQt5 window
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
-        convert_to_qt_format = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(convert_to_qt_format)
-        self.image_label.setPixmap(pixmap)
+        qt_img = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        self.image_label.setPixmap(QPixmap.fromImage(qt_img))
+
+    def process_qr_data(self, qr_data):
+        try:
+            return json.loads(qr_data)
+        except json.JSONDecodeError as e:
+            print(f"Error decoding QR data: {e}")
+            return None
 
     def reset_browser_flag(self):
-        # Reset the flag after 5 seconds to allow future QR code scans
         self.browser_opened = False
 
     def closeEvent(self, event):
@@ -112,8 +130,7 @@ class QRScannerApp(QWidget):
         self.cap.release()
         cv2.destroyAllWindows()
 
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    qr_scanner_app = QRScannerApp()
+    scanner = QRScannerApp()
     sys.exit(app.exec_())
